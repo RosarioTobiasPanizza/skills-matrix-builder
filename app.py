@@ -33,6 +33,7 @@ st.set_page_config(page_title="Skills Matrix Builder", page_icon="🧭", layout=
 DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_LEVELS = ["Junior", "Semi Senior", "Senior", "Lead"]
 MATURITY_LABELS = {1: "Inicial", 2: "En desarrollo", 3: "Competente", 4: "Avanzado", 5: "Experto"}
+TABS = ["🏠 Inicio", "1. Rol y skills", "2. Matriz", "3. Comparar niveles", "4. Descripción de puesto"]
 DISCLAIMER = (
     "Los resultados son propuestas generadas por IA y deben ser revisados por RR.HH. "
     "antes de usarse."
@@ -192,6 +193,25 @@ def demo_state() -> dict:
 # ---------------------------------------------------------------------------
 # Estado de la sesión
 # ---------------------------------------------------------------------------
+
+
+def go_to(tab: str) -> None:
+    """Callback de navegación: cambia la pestaña activa y pide volver arriba."""
+    st.session_state.active_tab = tab
+    st.session_state.scroll_top = True
+
+
+def nav_button(tab: str, label: str, key: str, primary: bool = True) -> None:
+    """Botón que lleva a otra pestaña sin tener que subir y hacer clic arriba."""
+    st.button(label, key=key, type="primary" if primary else "secondary", on_click=go_to, args=(tab,))
+
+
+def show_md(md: str) -> None:
+    """Muestra Markdown con títulos de menor tamaño dentro de un recuadro."""
+    md = re.sub(r"^## ", "#### ", md, flags=re.MULTILINE)
+    md = re.sub(r"^# ", "### ", md, flags=re.MULTILINE)
+    with st.container(border=True):
+        st.markdown(md)
 
 
 def init_state() -> None:
@@ -396,7 +416,8 @@ def ai_job_description(cfg: dict, desc: pd.DataFrame, level: str, skills: list[s
             title=f"{cfg['role']} — {level}",
             purpose=f"[Demo] Acompañar a los clientes de {cfg['industry']} para que obtengan valor del producto y renueven.",
             responsibilities=[desc.loc[s, level] for s in skills],
-            requirements=[f"{s}: nivel esperado según la matriz aprobada." for s in skills],
+            requirements=[f"{s}: nivel {int(st.session_state.mat_df.loc[s, level])} "
+                          f"({MATURITY_LABELS[int(st.session_state.mat_df.loc[s, level])]})." for s in skills],
             we_offer=["[Demo] Completar con la propuesta de valor de la empresa."],
         )
     else:
@@ -464,7 +485,10 @@ def from_json(raw: bytes) -> dict:
 
 def sidebar() -> None:
     with st.sidebar:
-        st.header("Configuración")
+        st.subheader("Tu recorrido")
+        st.session_state.progress_box = st.empty()  # se completa al final de main()
+        st.divider()
+        st.subheader("Configuración")
         secret_key = get_secret("ANTHROPIC_API_KEY")
         # Sin clave en Secrets, la app arranca en modo demo para que cualquiera pueda probarla.
         st.session_state.demo = st.toggle(
@@ -494,15 +518,87 @@ def sidebar() -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"No se pudo importar: {exc}")
 
-        st.divider()
-        st.subheader("Progreso")
-        check = lambda ok: "✅" if ok else "⬜"  # noqa: E731
-        st.markdown(
-            f"{check(st.session_state.skills_approved is not None)} Skills aprobadas  \n"
-            f"{check(st.session_state.matrix_approved)} Matriz aprobada  \n"
-            f"{check(st.session_state.comparison_md is not None)} Comparación generada  \n"
-            f"{check(st.session_state.jd_md is not None)} Descripción de puesto generada"
-        )
+
+
+PROGRESS_CSS = """
+<style>
+.jr {font-family: inherit;}
+.jr-badge {background: linear-gradient(135deg, #1E293B, #475569); color: #F8FAFC; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px;}
+.jr-badge small {color: #CBD5E1; font-size: 11.5px; letter-spacing: .4px; text-transform: uppercase;}
+.jr-badge div {font-size: 17px; font-weight: 700; margin-top: 2px;}
+.jr-dots {display: flex; gap: 4px; margin-top: 8px;}
+.jr-dots span {flex: 1; height: 6px; border-radius: 3px; background: rgba(255,255,255,.18);}
+.jr-dots span.on {background: #FF8A8A;}
+.jr-step {display: flex; gap: 10px; position: relative; padding-bottom: 14px;}
+.jr-step:not(:last-child)::after {content: ""; position: absolute; left: 13px; top: 28px; bottom: 0; width: 2px; background: #E2E8F0;}
+.jr-step.done:not(:last-child)::after {background: #22C55E;}
+.jr-dot {flex: 0 0 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; background: #E2E8F0; color: #64748B; z-index: 1;}
+.jr-step.done .jr-dot {background: #22C55E; color: #FFF;}
+.jr-step.now .jr-dot {background: #FF4B4B; color: #FFF; animation: jr-pulse 1.6s infinite;}
+@keyframes jr-pulse {0% {box-shadow: 0 0 0 0 rgba(255,75,75,.55);} 70% {box-shadow: 0 0 0 9px rgba(255,75,75,0);} 100% {box-shadow: 0 0 0 0 rgba(255,75,75,0);}}
+.jr-txt b {display: block; font-size: 14px; color: #0F172A; line-height: 1.25; margin-top: 4px;}
+.jr-txt span {font-size: 12px; color: #64748B;}
+.jr-step.now .jr-txt b {color: #FF4B4B;}
+.jr-step.todo .jr-txt b {color: #94A3B8;}
+</style>
+"""
+
+JOURNEY = [  # (pestaña, título, qué se consigue)
+    (1, "Skills aprobadas", "La IA propone, tú decides"),
+    (2, "Matriz aprobada", "Madurez y conductas por nivel"),
+    (3, "Niveles comparados", "Base del plan de carrera"),
+    (4, "Descripción de puesto", "Lista para revisar y publicar"),
+]
+JOURNEY_MESSAGES = [
+    "¡Arranquemos! Define el rol y deja que la IA proponga skills 🚀",
+    "Skills listas ✨ Ahora, a darles niveles en la matriz.",
+    "Matriz aprobada 🎯 Mira qué cambia al subir de nivel.",
+    "¡Casi! Solo falta la descripción de puesto 📝",
+    "¡Recorrido completo! Descarga tus resultados 🏆",
+]
+
+
+def render_progress() -> None:
+    """Recorrido interactivo en la barra lateral. Se llama al final de main(),
+    cuando el estado ya refleja la última acción del usuario."""
+    ss = st.session_state
+    done = [ss.skills_approved is not None, bool(ss.matrix_approved),
+            ss.comparison_md is not None, ss.jd_md is not None]
+    n_done = sum(done)
+    current = next((i for i, ok in enumerate(done) if not ok), None)  # primer paso pendiente
+
+    # Guiño a la escala de la matriz: el "nivel de madurez" de quien usa la app sube con cada paso.
+    maturity = n_done + 1
+    dots = "".join(f'<span class="{"on" if i < maturity else ""}"></span>' for i in range(5))
+    steps_html = ""
+    for i, (_, title, sub) in enumerate(JOURNEY):
+        state = "done" if done[i] else ("now" if i == current else "todo")
+        icon = "✓" if done[i] else str(i + 1)
+        steps_html += (f'<div class="jr-step {state}"><div class="jr-dot">{icon}</div>'
+                       f'<div class="jr-txt"><b>{title}</b><span>{sub}</span></div></div>')
+
+    with ss.progress_box.container():
+        st.html(PROGRESS_CSS + f"""
+        <div class="jr">
+          <div class="jr-badge"><small>Tu madurez en Skills Matrix Builder</small>
+            <div>Nivel {maturity} · {MATURITY_LABELS[maturity]}</div>
+            <div class="jr-dots">{dots}</div></div>
+          {steps_html}
+        </div>""")
+        st.progress(n_done / 4, text=f"{n_done} de 4 pasos · {n_done * 25}%")
+        st.caption(JOURNEY_MESSAGES[n_done])
+        if current is not None:
+            tab = TABS[JOURNEY[current][0]]
+            if ss.get("active_tab") != tab:
+                st.button(f"Continuar: {tab} →", key="journey_go", on_click=go_to, args=(tab,), width="stretch")
+
+    # Celebración, una sola vez, al completar el recorrido.
+    if n_done == 4 and not ss.get("celebrated"):
+        ss.celebrated = True
+        st.balloons()
+    elif n_done < 4:
+        ss.celebrated = False
 
 
 def tab_role() -> None:
@@ -577,7 +673,11 @@ def tab_role() -> None:
             else:
                 st.session_state.skills_approved = clean.reset_index(drop=True)
                 st.session_state.matrix_approved = False
-                st.success("Skills aprobadas. Continúa en la pestaña «2. Matriz».")
+                st.session_state.desc_df = st.session_state.mat_df = None
+                st.session_state.comparison_md = st.session_state.jd_md = None
+        if st.session_state.skills_approved is not None:
+            st.success("Skills aprobadas.")
+            nav_button(TABS[2], "Siguiente paso: generar la matriz →", "next_1")
 
 
 def heatmap(mat: pd.DataFrame) -> go.Figure:
@@ -596,6 +696,7 @@ def tab_matrix() -> None:
     st.subheader("Paso 2 · Matriz de habilidades")
     if st.session_state.skills_approved is None:
         st.info("🔒 Aprueba primero las skills en la pestaña «1. Rol y skills».")
+        nav_button(TABS[1], "← Ir al paso 1", "back_2", primary=False)
         return
     cfg = st.session_state.config
     if st.button("✨ Generar matriz" if st.session_state.desc_df is None else "🔄 Volver a generar matriz",
@@ -638,18 +739,21 @@ def tab_matrix() -> None:
     if c1.button("✅ Aprobar matriz", type="primary"):
         st.session_state.desc_df, st.session_state.mat_df = desc_edit, mat_edit.astype("Int64")
         st.session_state.matrix_approved = True
-        st.success("Matriz aprobada. Ya puedes comparar niveles y generar descripciones de puesto.")
     skills = st.session_state.skills_approved
     c2.download_button("⬇️ Descargar Excel", to_excel(skills, desc_edit, mat_edit),
                        file_name="skills_matrix.xlsx", width="stretch")
     c3.download_button("⬇️ Descargar JSON (para retomar)", to_json(cfg, skills, desc_edit, mat_edit),
                        file_name="skills_matrix.json", mime="application/json", width="stretch")
+    if st.session_state.matrix_approved:
+        st.success("Matriz aprobada. Ya puedes comparar niveles y generar descripciones de puesto.")
+        nav_button(TABS[3], "Siguiente paso: comparar niveles →", "next_2")
 
 
 def tab_compare() -> None:
     st.subheader("Paso 3 · Comparar niveles (base del plan de carrera)")
     if not st.session_state.matrix_approved:
         st.info("🔒 Aprueba primero la matriz en la pestaña «2. Matriz».")
+        nav_button(TABS[2], "← Ir al paso 2", "back_3", primary=False)
         return
     cfg, desc, mat = st.session_state.config, st.session_state.desc_df, st.session_state.mat_df
     levels = cfg["levels"]
@@ -678,15 +782,19 @@ def tab_compare() -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Error al generar la comparación: {exc}")
     if st.session_state.comparison_md:
-        st.markdown(st.session_state.comparison_md)
+        show_md(st.session_state.comparison_md)
         st.download_button("⬇️ Descargar comparación (.md)", st.session_state.comparison_md,
                            file_name="comparacion_niveles.md", mime="text/markdown")
+    st.divider()
+    nav_button(TABS[4], "Siguiente paso: descripción de puesto →", "next_3",
+               primary=st.session_state.comparison_md is not None)
 
 
 def tab_jd() -> None:
     st.subheader("Paso 4 · Descripción de puesto")
     if not st.session_state.matrix_approved:
         st.info("🔒 Aprueba primero la matriz en la pestaña «2. Matriz».")
+        nav_button(TABS[2], "← Ir al paso 2", "back_4", primary=False)
         return
     cfg, desc = st.session_state.config, st.session_state.desc_df
     level = st.selectbox("Nivel del puesto", cfg["levels"], index=len(cfg["levels"]) - 2)
@@ -698,32 +806,154 @@ def tab_jd() -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Error al generar la descripción: {exc}")
     if st.session_state.jd_md:
-        st.markdown(st.session_state.jd_md)
+        show_md(st.session_state.jd_md)
         st.download_button("⬇️ Descargar descripción (.md)", st.session_state.jd_md,
                            file_name="descripcion_de_puesto.md", mime="text/markdown")
+        st.divider()
+        st.success("¡Proceso completo! Puedes volver a la matriz para descargarla o empezar con otro rol.")
+        c1, c2 = st.columns(2)
+        with c1:
+            nav_button(TABS[2], "← Volver a la matriz", "back_jd", primary=False)
+        with c2:
+            nav_button(TABS[1], "Empezar con otro rol", "restart", primary=False)
+
+
+HOME_CSS = """
+<style>
+.smb-hero {background: linear-gradient(135deg, #1E293B 0%, #334155 60%, #475569 100%); color: #F8FAFC;
+  border-radius: 18px; padding: 40px 44px; margin-bottom: 8px;}
+.smb-kicker {display: inline-block; background: rgba(255,75,75,.18); color: #FFB4B4; border: 1px solid rgba(255,75,75,.45);
+  border-radius: 999px; padding: 4px 12px; font-size: 13px; font-weight: 600; letter-spacing: .3px;}
+.smb-hero h1 {color: #F8FAFC; font-size: 40px; line-height: 1.15; margin: 16px 0 12px; padding: 0;}
+.smb-hero h1 span {color: #FF8A8A;}
+.smb-hero p {color: #CBD5E1; font-size: 18px; line-height: 1.55; max-width: 760px; margin: 0;}
+.smb-section {font-size: 13px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #FF4B4B; margin: 28px 0 10px;}
+.smb-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px;}
+.smb-card {background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 14px; padding: 18px 18px 16px; color: #1E293B;}
+.smb-card .ico {font-size: 26px; line-height: 1;}
+.smb-card h4 {color: #0F172A; font-size: 17px; margin: 10px 0 6px; padding: 0;}
+.smb-card p {color: #475569; font-size: 14.5px; line-height: 1.5; margin: 0;}
+.smb-problem {background: #FFF5F5; border-color: #FECACA;}
+.smb-flow {display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; counter-reset: step;}
+.smb-step {position: relative; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 14px; padding: 16px; color: #1E293B;}
+.smb-step b {display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%;
+  background: #FF4B4B; color: #FFF; font-size: 14px; margin-bottom: 8px;}
+.smb-step h4 {color: #0F172A; font-size: 15.5px; margin: 0 0 4px; padding: 0;}
+.smb-step p {color: #475569; font-size: 13.5px; line-height: 1.45; margin: 0;}
+.smb-who {display: flex; flex-wrap: wrap; gap: 10px;}
+.smb-pill {background: #F1F5F9; border: 1px solid #E2E8F0; border-radius: 999px; padding: 8px 14px; color: #1E293B; font-size: 14px;}
+.smb-pill b {color: #0F172A;}
+</style>
+"""
+
+HOME_HERO_HTML = """
+<div class="smb-hero">
+  <span class="smb-kicker">IA aplicada a Recursos Humanos</span>
+  <h1>Qué se espera de cada rol, <span>en cada nivel</span>, en minutos.</h1>
+  <p>Skills Matrix Builder usa IA generativa para que RR.HH. construya la matriz de habilidades de un rol con niveles
+  de madurez por seniority, y la convierta en planes de carrera y descripciones de puesto coherentes.</p>
+</div>
+"""
+
+HOME_BODY_HTML = """
+<div class="smb-section">El problema</div>
+<div class="smb-grid">
+  <div class="smb-card smb-problem"><div class="ico">⏳</div><h4>Semanas de talleres</h4>
+    <p>Armar una matriz a mano exige muchas reuniones con managers y redactar descriptores para cada skill y cada nivel.</p></div>
+  <div class="smb-card smb-problem"><div class="ico">🧩</div><h4>Criterios dispares</h4>
+    <p>Sin matriz, promociones, planes de desarrollo y búsquedas se definen distinto según quién decide.</p></div>
+  <div class="smb-card smb-problem"><div class="ico">🌫️</div><h4>Expectativas vagas</h4>
+    <p>“Ser proactivo” o “tener buena comunicación” no dicen qué conducta concreta separa a un nivel del siguiente.</p></div>
+</div>
+
+<div class="smb-section">Qué obtienes</div>
+<div class="smb-grid">
+  <div class="smb-card"><div class="ico">🧭</div><h4>Matriz de habilidades</h4>
+    <p>Skills técnicas y conductuales, con un nivel de madurez de 1 a 5 y conductas observables por seniority.</p></div>
+  <div class="smb-card"><div class="ico">📈</div><h4>Comparación entre niveles</h4>
+    <p>Qué cambia de un nivel al siguiente, qué evidencias lo demuestran y qué acciones de desarrollo ayudan.</p></div>
+  <div class="smb-card"><div class="ico">📝</div><h4>Descripción de puesto</h4>
+    <p>Redactada a partir de la matriz aprobada, con lenguaje inclusivo y requisitos coherentes con el nivel.</p></div>
+  <div class="smb-card"><div class="ico">📤</div><h4>Todo exportable</h4>
+    <p>Excel y JSON para la matriz (y retomarla después), Markdown para comparaciones y descripciones.</p></div>
+</div>
+
+<div class="smb-section">Cómo funciona</div>
+<div class="smb-flow">
+  <div class="smb-step"><b>1</b><h4>Define el rol</h4><p>Rol, contexto de la empresa, niveles y cantidad de skills.</p></div>
+  <div class="smb-step"><b>2</b><h4>Aprueba las skills</h4><p>La IA propone; RR.HH. edita, agrega o quita.</p></div>
+  <div class="smb-step"><b>3</b><h4>Aprueba la matriz</h4><p>Descriptores y madurez por nivel, con mapa de calor.</p></div>
+  <div class="smb-step"><b>4</b><h4>Usa los resultados</h4><p>Compara niveles y genera descripciones de puesto.</p></div>
+</div>
+
+<div class="smb-section">Principios de diseño</div>
+<div class="smb-grid">
+  <div class="smb-card"><div class="ico">🙋</div><h4>La IA propone, la persona decide</h4>
+    <p>Nada se usa sin revisión y aprobación de RR.HH. en cada paso.</p></div>
+  <div class="smb-card"><div class="ico">🔒</div><h4>Roles, no personas</h4>
+    <p>La app no recibe ni procesa datos personales de empleados.</p></div>
+  <div class="smb-card"><div class="ico">⚖️</div><h4>No puntúa a nadie</h4>
+    <p>Evaluar el desempeño de trabajadores es de alto riesgo según el AI Act europeo: esa decisión queda en manos del manager.</p></div>
+</div>
+
+<div class="smb-section">Para quién</div>
+<div class="smb-who">
+  <div class="smb-pill"><b>RR.HH.</b> la opera y aprueba</div>
+  <div class="smb-pill"><b>Managers</b> definen expectativas y búsquedas</div>
+  <div class="smb-pill"><b>Empleados</b> saben qué se espera para crecer</div>
+</div>
+"""
+
+
+def start_demo_example() -> None:
+    """Callback: carga el ejemplo completo y lleva a la matriz."""
+    load_full_state(demo_state())
+    go_to(TABS[2])
+
+
+def home_actions(suffix: str) -> None:
+    """Botones de entrada: empezar el proceso o ver el ejemplo ya resuelto."""
+    c1, c2, _ = st.columns([1.1, 1.3, 2])
+    with c1:
+        nav_button(TABS[1], "Empezar ahora →", f"home_start_{suffix}")
+    with c2:
+        st.button("Ver un ejemplo completo", key=f"home_example_{suffix}", on_click=start_demo_example,
+                  help="Carga el ejemplo de Customer Success Manager con la matriz ya aprobada.")
+
+
+def tab_home() -> None:
+    st.html(HOME_CSS + HOME_HERO_HTML)
+    home_actions("top")
+    if st.session_state.demo:
+        st.caption("🧪 La app está en modo demo: usa datos de ejemplo y no llama a la API de IA.")
+    st.html(HOME_CSS + HOME_BODY_HTML)
+    st.write("")
+    home_actions("bottom")
 
 
 def main() -> None:
     init_state()
     sidebar()
-    st.title("🧭 Skills Matrix Builder")
-    st.markdown(
-        "Construye con IA la **matriz de habilidades** de un rol, con niveles de madurez por seniority. "
-        "Después, úsala para **comparar niveles** y generar **descripciones de puesto**. "
-        "La IA propone; RR.HH. revisa, edita y aprueba cada paso."
-    )
-    st.warning(DISCLAIMER, icon="⚠️")
-    if st.session_state.demo:
-        st.info("Modo demo activo: se usan resultados de ejemplo y no se llama a la API.", icon="🧪")
-    t1, t2, t3, t4 = st.tabs(["1. Rol y skills", "2. Matriz", "3. Comparar niveles", "4. Descripción de puesto"])
-    with t1:
-        tab_role()
-    with t2:
-        tab_matrix()
-    with t3:
-        tab_compare()
-    with t4:
-        tab_jd()
+    st.caption("🧭 **Skills Matrix Builder** · IA aplicada a Recursos Humanos")
+    # Pestañas con estado: los botones de navegación cambian la pestaña activa.
+    home, t1, t2, t3, t4 = st.tabs(TABS, key="active_tab", on_change="rerun")
+    with home:
+        tab_home()
+    for tab, render in ((t1, tab_role), (t2, tab_matrix), (t3, tab_compare), (t4, tab_jd)):
+        with tab:
+            st.warning(DISCLAIMER, icon="⚠️")
+            render()
+
+    render_progress()
+
+    # Tras navegar con un botón, volver al inicio de la página.
+    if st.session_state.pop("scroll_top", False):
+        st.html(
+            "<script>for (const sel of ['[data-testid=\"stMain\"]', '[data-testid=\"stAppViewContainer\"]']) {"
+            "const el = document.querySelector(sel); if (el) el.scrollTo({top: 0, behavior: 'smooth'}); }"
+            "window.scrollTo({top: 0, behavior: 'smooth'});</script>",
+            unsafe_allow_javascript=True,
+        )
 
 
 main()
