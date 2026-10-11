@@ -465,16 +465,18 @@ def from_json(raw: bytes) -> dict:
 def sidebar() -> None:
     with st.sidebar:
         st.header("Configuración")
+        secret_key = get_secret("ANTHROPIC_API_KEY")
+        # Sin clave en Secrets, la app arranca en modo demo para que cualquiera pueda probarla.
         st.session_state.demo = st.toggle(
-            "Modo demo (sin IA)", value=st.session_state.get("demo", False),
+            "Modo demo (sin IA)", value=st.session_state.get("demo", not secret_key),
             help="Usa un ejemplo precargado (Customer Success Manager) y no llama a la API.")
         if st.session_state.demo:
             if st.button("Cargar ejemplo completo", width="stretch"):
                 load_full_state(demo_state())
                 st.rerun()
+            st.caption("Atajo: carga el ejemplo con skills y matriz ya aprobadas.")
             st.session_state.api_key = None
         else:
-            secret_key = get_secret("ANTHROPIC_API_KEY")
             if secret_key:
                 st.session_state.api_key = secret_key
                 st.success("Clave de API cargada desde Secrets.")
@@ -505,7 +507,15 @@ def sidebar() -> None:
 
 def tab_role() -> None:
     st.subheader("Paso 1 · Definir el rol y proponer skills")
-    cfg = st.session_state.config or {}
+    demo = st.session_state.demo
+    cfg = st.session_state.config or (DEMO_CONFIG if demo else {})
+    if demo:
+        st.info(
+            "**Cómo probar la demo:** pulsa «Proponer skills», revisa y aprueba la tabla, y sigue por las "
+            "pestañas 2, 3 y 4. En modo demo los resultados corresponden siempre al ejemplo de "
+            "Customer Success Manager; con una clave de API, la IA los genera para cualquier rol.",
+            icon="🧪",
+        )
     with st.form("config_form"):
         c1, c2 = st.columns(2)
         role = c1.text_input("Rol o familia de puestos *", cfg.get("role", ""), placeholder="Ej.: Customer Success Manager")
@@ -530,7 +540,7 @@ def tab_role() -> None:
         elif not 3 <= len(levels) <= 5 or len(set(levels)) != len(levels):
             st.error("Indica entre 3 y 5 niveles distintos.")
         else:
-            st.session_state.config = {
+            st.session_state.config = dict(DEMO_CONFIG) if demo else {
                 "role": role.strip(), "area": area.strip(), "industry": industry.strip(),
                 "company_size": company_size, "framework": framework.strip(), "levels": levels,
                 "n_skills": n_skills, "tech_share": tech_share, "language": language,
