@@ -1,0 +1,6 @@
+streamlit>=1.50
+anthropic>=0.40
+pydantic>=2.6
+pandas>=2.1
+plotly>=5.20
+openpyxl>=3.1
